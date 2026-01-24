@@ -1,0 +1,31 @@
+{
+  "name": "sk-company-lookup",
+  "version": "1.0.0",
+  "description": "Slovak company lookup microservice with autocomplete",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "import": "tsx scripts/import-rpo.ts",
+    "migrate": "tsx scripts/migrate.ts"
+  },
+  "keywords": ["slovakia", "company", "lookup", "autocomplete", "ico"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
