@@ -107,204 +107,262 @@ export class ImportService {
 
   /**
    * Parse SQL dump and extract company data
-   * The RPO dump contains several tables, we need:
-   * - rpo_legal_subjects (main company info)
+   * Uses temporary database tables to avoid memory issues with large datasets
    */
   static async parseAndImport(): Promise<number> {
-    console.log('[Import] Parsing SQL dump...');
+    console.log('[Import] Setting up temporary tables in database...');
 
     const pool = getPool();
-    let recordCount = 0;
-    let batchValues: string[] = [];
-    const BATCH_SIZE = 1000;
 
-    // Create temporary staging table
+    // Create temporary import tables
     await query(`
-      CREATE TABLE IF NOT EXISTS companies_staging (LIKE companies INCLUDING ALL);
-      TRUNCATE companies_staging;
+      DROP TABLE IF EXISTS import_organizations CASCADE;
+      DROP TABLE IF EXISTS import_identifiers CASCADE;
+      DROP TABLE IF EXISTS import_names CASCADE;
+      DROP TABLE IF EXISTS import_addresses CASCADE;
+      DROP TABLE IF EXISTS import_legal_form_entries CASCADE;
+      DROP TABLE IF EXISTS import_legal_forms CASCADE;
+      DROP TABLE IF EXISTS companies_staging CASCADE;
+
+      CREATE TABLE import_organizations (
+        id INTEGER PRIMARY KEY,
+        terminated_on DATE
+      );
+
+      CREATE TABLE import_identifiers (
+        organization_id INTEGER,
+        ico VARCHAR(20),
+        effective_to DATE
+      );
+
+      CREATE TABLE import_names (
+        organization_id INTEGER,
+        name TEXT,
+        effective_to DATE
+      );
+
+      CREATE TABLE import_addresses (
+        organization_id INTEGER,
+        street TEXT,
+        city TEXT,
+        postal_code VARCHAR(20),
+        effective_to DATE
+      );
+
+      CREATE TABLE import_legal_form_entries (
+        organization_id INTEGER,
+        legal_form_id INTEGER,
+        effective_to DATE
+      );
+
+      CREATE TABLE import_legal_forms (
+        id INTEGER PRIMARY KEY,
+        name VARCHAR(200)
+      );
     `);
 
-    const insertBatch = async () => {
-      if (batchValues.length === 0) return;
-
-      const sql = `
-        INSERT INTO companies_staging (
-          ico, dic, ic_dph, name, name_normalized,
-          legal_form, street, city, postal_code, country,
-          is_active
-        ) VALUES ${batchValues.join(',')}
-        ON CONFLICT (ico) DO UPDATE SET
-          name = EXCLUDED.name,
-          name_normalized = EXCLUDED.name_normalized,
-          legal_form = EXCLUDED.legal_form,
-          street = EXCLUDED.street,
-          city = EXCLUDED.city,
-          postal_code = EXCLUDED.postal_code,
-          is_active = EXCLUDED.is_active
-      `;
-
-      await pool.query(sql);
-      recordCount += batchValues.length;
-      batchValues = [];
-
-      if (recordCount % 10000 === 0) {
-        console.log(`[Import] Processed ${recordCount} records...`);
-      }
-    };
-
-    // Read and parse SQL file line by line
+    // Read and stream data to database
     const fileStream = createReadStream(TEMP_SQL_FILE);
     const rl = createInterface({
       input: fileStream,
       crlfDelay: Infinity
     });
 
-    let isInsertingSubjects = false;
-    let currentInsertBuffer = '';
+    let currentTable: string | null = null;
+    let batchValues: string[] = [];
+    let targetTable: string | null = null;
+    let insertColumns: string = '';
+    const BATCH_SIZE = 5000;
+
+    const insertBatch = async () => {
+      if (batchValues.length === 0 || !targetTable) return;
+
+      const sql = `INSERT INTO ${targetTable} (${insertColumns}) VALUES ${batchValues.join(',')}`;
+      try {
+        await pool.query(sql);
+      } catch (e) {
+        console.error(`[Import] Error inserting into ${targetTable}:`, e);
+      }
+      batchValues = [];
+    };
+
+    console.log('[Import] Streaming data to temporary tables...');
+    let lineCount = 0;
 
     for await (const line of rl) {
-      // Detect start of INSERT INTO rpo_legal_subjects
-      if (line.includes('INSERT INTO') && line.includes('rpo_legal_subjects')) {
-        isInsertingSubjects = true;
-        currentInsertBuffer = line;
+      // Detect COPY statement
+      if (line.startsWith('COPY rpo.')) {
+        await insertBatch(); // Flush previous batch
+
+        const match = line.match(/COPY rpo\.(\w+)/);
+        currentTable = match ? match[1] : null;
+
+        // Map source tables to import tables
+        if (currentTable === 'organizations') {
+          targetTable = 'import_organizations';
+          insertColumns = 'id, terminated_on';
+        } else if (currentTable === 'organization_identifier_entries') {
+          targetTable = 'import_identifiers';
+          insertColumns = 'organization_id, ico, effective_to';
+        } else if (currentTable === 'organization_name_entries') {
+          targetTable = 'import_names';
+          insertColumns = 'organization_id, name, effective_to';
+        } else if (currentTable === 'organization_address_entries') {
+          targetTable = 'import_addresses';
+          insertColumns = 'organization_id, street, city, postal_code, effective_to';
+        } else if (currentTable === 'organization_legal_form_entries') {
+          targetTable = 'import_legal_form_entries';
+          insertColumns = 'organization_id, legal_form_id, effective_to';
+        } else if (currentTable === 'legal_forms') {
+          targetTable = 'import_legal_forms';
+          insertColumns = 'id, name';
+        } else {
+          targetTable = null;
+        }
         continue;
       }
 
-      if (isInsertingSubjects) {
-        currentInsertBuffer += line;
+      // End of COPY data
+      if (line === '\\.' || line.startsWith('--')) {
+        await insertBatch();
+        currentTable = null;
+        targetTable = null;
+        continue;
+      }
 
-        // Check if INSERT statement is complete
-        if (line.endsWith(';')) {
-          // Parse the INSERT statement
-          const parsed = this.parseInsertStatement(currentInsertBuffer);
-          for (const company of parsed) {
-            if (company.ico && company.name) {
-              const escapedValues = this.escapeValues(company);
-              batchValues.push(escapedValues);
+      // Parse and buffer COPY data
+      if (currentTable && targetTable && line.length > 0) {
+        const fields = line.split('\t');
+        let values: string | null = null;
 
-              if (batchValues.length >= BATCH_SIZE) {
-                await insertBatch();
-              }
-            }
+        const esc = (v: string): string => {
+          if (v === '\\N') return 'NULL';
+          return `'${v.replace(/'/g, "''").replace(/\\/g, '\\\\')}'`;
+        };
+
+        switch (currentTable) {
+          case 'organizations':
+            values = `(${fields[0]}, ${fields[2] === '\\N' ? 'NULL' : esc(fields[2])})`;
+            break;
+          case 'organization_identifier_entries':
+            // organization_id, ico, effective_to
+            values = `(${fields[1]}, ${esc(fields[2])}, ${fields[4] === '\\N' ? 'NULL' : esc(fields[4])})`;
+            break;
+          case 'organization_name_entries':
+            // organization_id, name, effective_to
+            values = `(${fields[1]}, ${esc(fields[2])}, ${fields[4] === '\\N' ? 'NULL' : esc(fields[4])})`;
+            break;
+          case 'organization_address_entries':
+            // organization_id, street, city, postal_code, effective_to
+            values = `(${fields[1]}, ${esc(fields[3])}, ${esc(fields[7])}, ${esc(fields[6])}, ${fields[10] === '\\N' ? 'NULL' : esc(fields[10])})`;
+            break;
+          case 'organization_legal_form_entries':
+            // organization_id, legal_form_id, effective_to
+            values = `(${fields[1]}, ${fields[2]}, ${fields[4] === '\\N' ? 'NULL' : esc(fields[4])})`;
+            break;
+          case 'legal_forms':
+            values = `(${fields[0]}, ${esc(fields[1])})`;
+            break;
+        }
+
+        if (values) {
+          batchValues.push(values);
+          if (batchValues.length >= BATCH_SIZE) {
+            await insertBatch();
           }
-          isInsertingSubjects = false;
-          currentInsertBuffer = '';
+        }
+
+        lineCount++;
+        if (lineCount % 500000 === 0) {
+          console.log(`[Import] Processed ${lineCount} lines...`);
         }
       }
     }
 
-    // Insert remaining records
     await insertBatch();
+    console.log(`[Import] Streamed ${lineCount} lines to temporary tables`);
 
-    console.log(`[Import] Total records imported: ${recordCount}`);
+    // Create indexes on temporary tables
+    console.log('[Import] Creating indexes...');
+    await query(`
+      CREATE INDEX idx_import_identifiers_org ON import_identifiers(organization_id);
+      CREATE INDEX idx_import_names_org ON import_names(organization_id);
+      CREATE INDEX idx_import_addresses_org ON import_addresses(organization_id);
+      CREATE INDEX idx_import_legal_form_entries_org ON import_legal_form_entries(organization_id);
+    `);
+
+    // Now join tables and create companies
+    console.log('[Import] Joining tables and creating companies...');
+
+    await query(`
+      CREATE TABLE companies_staging (
+        id SERIAL PRIMARY KEY,
+        ico VARCHAR(20) NOT NULL UNIQUE,
+        dic VARCHAR(20),
+        ic_dph VARCHAR(20),
+        name TEXT NOT NULL,
+        name_normalized TEXT NOT NULL,
+        legal_form TEXT,
+        street TEXT,
+        city TEXT,
+        postal_code VARCHAR(20),
+        country VARCHAR(50) DEFAULT 'Slovensko',
+        is_active BOOLEAN DEFAULT true,
+        imported_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    const insertResult = await query(`
+      INSERT INTO companies_staging (
+        ico, dic, ic_dph, name, name_normalized,
+        legal_form, street, city, postal_code, country,
+        is_active
+      )
+      SELECT DISTINCT ON (i.ico)
+        i.ico,
+        NULL as dic,
+        NULL as ic_dph,
+        n.name,
+        LOWER(TRANSLATE(n.name, 'áäčďéěíľĺňóôöŕřšťúůüýžÁÄČĎÉĚÍĽĹŇÓÔÖŔŘŠŤÚŮÜÝŽ', 'aacdeeilnooorrstuuuyzAACDEEILLNOOORRSTUUUYZ')) as name_normalized,
+        lf.name as legal_form,
+        a.street,
+        a.city,
+        a.postal_code,
+        'Slovensko' as country,
+        (o.terminated_on IS NULL) as is_active
+      FROM import_identifiers i
+      JOIN import_names n ON n.organization_id = i.organization_id AND n.effective_to IS NULL
+      LEFT JOIN import_organizations o ON o.id = i.organization_id
+      LEFT JOIN import_addresses a ON a.organization_id = i.organization_id AND a.effective_to IS NULL
+      LEFT JOIN import_legal_form_entries lfe ON lfe.organization_id = i.organization_id AND lfe.effective_to IS NULL
+      LEFT JOIN import_legal_forms lf ON lf.id = lfe.legal_form_id
+      WHERE i.effective_to IS NULL
+        AND i.ico IS NOT NULL
+        AND n.name IS NOT NULL
+      ORDER BY i.ico, n.name
+    `);
+
+    const recordCount = insertResult.rowCount || 0;
+    console.log(`[Import] Inserted ${recordCount} companies`);
+
+    // Create unique index on staging
+    await query(`
+      CREATE UNIQUE INDEX idx_staging_ico ON companies_staging(ico);
+    `);
+
+    // Cleanup temporary tables
+    console.log('[Import] Cleaning up temporary tables...');
+    await query(`
+      DROP TABLE IF EXISTS import_organizations CASCADE;
+      DROP TABLE IF EXISTS import_identifiers CASCADE;
+      DROP TABLE IF EXISTS import_names CASCADE;
+      DROP TABLE IF EXISTS import_addresses CASCADE;
+      DROP TABLE IF EXISTS import_legal_form_entries CASCADE;
+      DROP TABLE IF EXISTS import_legal_forms CASCADE;
+    `);
+
     return recordCount;
-  }
-
-  /**
-   * Parse INSERT statement and extract values
-   */
-  static parseInsertStatement(sql: string): Array<{
-    ico: string;
-    name: string;
-    legalForm: string | null;
-    street: string | null;
-    city: string | null;
-    postalCode: string | null;
-    isActive: boolean;
-  }> {
-    const results: Array<{
-      ico: string;
-      name: string;
-      legalForm: string | null;
-      street: string | null;
-      city: string | null;
-      postalCode: string | null;
-      isActive: boolean;
-    }> = [];
-
-    // Extract VALUES portion
-    const valuesMatch = sql.match(/VALUES\s*(.+);?$/is);
-    if (!valuesMatch) return results;
-
-    // Parse individual value groups - this is simplified, real implementation
-    // would need proper SQL parsing for escaped strings
-    const valuesStr = valuesMatch[1];
-
-    // Split by ),( pattern (simplified)
-    const tuples = valuesStr.split(/\),\s*\(/);
-
-    for (const tuple of tuples) {
-      const cleaned = tuple.replace(/^\(/, '').replace(/\)$/, '');
-      const values = this.splitSqlValues(cleaned);
-
-      // RPO dump structure (approximate column positions):
-      // id, ico, business_name, legal_form, ...
-      if (values.length >= 4) {
-        results.push({
-          ico: this.cleanSqlValue(values[1]) || '',
-          name: this.cleanSqlValue(values[2]) || '',
-          legalForm: this.cleanSqlValue(values[3]),
-          street: null,
-          city: null,
-          postalCode: null,
-          isActive: true
-        });
-      }
-    }
-
-    return results;
-  }
-
-  /**
-   * Split SQL values handling quoted strings
-   */
-  static splitSqlValues(str: string): string[] {
-    const values: string[] = [];
-    let current = '';
-    let inQuote = false;
-    let escapeNext = false;
-
-    for (let i = 0; i < str.length; i++) {
-      const char = str[i];
-
-      if (escapeNext) {
-        current += char;
-        escapeNext = false;
-        continue;
-      }
-
-      if (char === '\\' || (char === "'" && str[i + 1] === "'")) {
-        escapeNext = true;
-        current += char;
-        continue;
-      }
-
-      if (char === "'") {
-        inQuote = !inQuote;
-        current += char;
-        continue;
-      }
-
-      if (char === ',' && !inQuote) {
-        values.push(current.trim());
-        current = '';
-        continue;
-      }
-
-      current += char;
-    }
-
-    values.push(current.trim());
-    return values;
-  }
-
-  /**
-   * Clean SQL value (remove quotes, handle NULL)
-   */
-  static cleanSqlValue(value: string): string | null {
-    if (!value || value === 'NULL') return null;
-    // Remove surrounding quotes
-    return value.replace(/^'|'$/g, '').replace(/''/g, "'");
   }
 
   /**
@@ -347,13 +405,18 @@ export class ImportService {
   static async swapTables(): Promise<void> {
     console.log('[Import] Swapping tables...');
     await query(`
-      BEGIN;
-      DROP TABLE IF EXISTS companies_old;
+      DROP TABLE IF EXISTS companies_old CASCADE;
       ALTER TABLE IF EXISTS companies RENAME TO companies_old;
       ALTER TABLE companies_staging RENAME TO companies;
-      DROP TABLE IF EXISTS companies_old;
-      COMMIT;
+      DROP TABLE IF EXISTS companies_old CASCADE;
     `);
+
+    // Recreate indexes on new table
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_companies_name_trgm ON companies USING GIN (name_normalized gin_trgm_ops);
+      CREATE INDEX IF NOT EXISTS idx_companies_ico ON companies (ico text_pattern_ops);
+    `);
+
     console.log('[Import] Tables swapped successfully');
   }
 
