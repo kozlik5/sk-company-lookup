@@ -21,7 +21,6 @@ export interface CompanyDetails {
     country: string;
   };
   isActive: boolean;
-  establishedDate: string | null;
 }
 
 /**
@@ -132,7 +131,6 @@ export class SearchService {
       postal_code: string | null;
       country: string;
       is_active: boolean;
-      established_date: Date | null;
     }>(
       `
       SELECT
@@ -145,8 +143,7 @@ export class SearchService {
         city,
         postal_code,
         country,
-        is_active,
-        established_date
+        is_active
       FROM companies
       WHERE ico = $1
       `,
@@ -170,8 +167,7 @@ export class SearchService {
         postalCode: row.postal_code,
         country: row.country
       },
-      isActive: row.is_active,
-      establishedDate: row.established_date?.toISOString().split('T')[0] || null
+      isActive: row.is_active
     };
   }
 
