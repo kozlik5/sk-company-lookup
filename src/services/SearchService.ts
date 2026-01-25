@@ -77,8 +77,8 @@ export class SearchService {
         LIMIT $3
       `;
       params = [`${searchQuery.trim()}%`, searchQuery.trim(), limit];
-    } else {
-      // Name search - use trigram similarity + prefix match
+    } else if (normalizedQuery.length <= 3) {
+      // Short query - use prefix match (faster)
       sql = `
         SELECT
           ico,
@@ -87,23 +87,29 @@ export class SearchService {
           city,
           is_active as "isActive"
         FROM companies
-        WHERE (
-          name_normalized LIKE $1
-          OR name_normalized % $2
-          OR name_normalized ILIKE $3
-        )
+        WHERE name_normalized LIKE $1
         ${includeInactive ? '' : 'AND is_active = true'}
-        ORDER BY
-          CASE
-            WHEN name_normalized = $2 THEN 0
-            WHEN name_normalized LIKE $1 THEN 1
-            ELSE 2
-          END,
-          similarity(name_normalized, $2) DESC,
-          name
-        LIMIT $4
+        ORDER BY name
+        LIMIT $2
       `;
-      params = [`${escapedQuery}%`, normalizedQuery, `%${escapedQuery}%`, limit];
+      params = [`${escapedQuery}%`, limit];
+    } else {
+      // Name search - optimized for pg_trgm GIN index
+      sql = `
+        SELECT
+          ico,
+          name,
+          legal_form as "legalForm",
+          city,
+          is_active as "isActive",
+          similarity(name_normalized, $1) as sim
+        FROM companies
+        WHERE name_normalized % $1
+        ${includeInactive ? '' : 'AND is_active = true'}
+        ORDER BY sim DESC, name
+        LIMIT $2
+      `;
+      params = [normalizedQuery, limit];
     }
 
     const result = await query<{
