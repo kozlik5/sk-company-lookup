@@ -1,0 +1,92 @@
+name: Weekly Data Import
+
+on:
+  schedule:
+    # Run every Sunday at 4:00 AM UTC (5:00 AM CET)
+    - cron: '0 4 * * 0'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Get initial stats
+        env:
+          API_URL: https://sk-company-lookup.fly.dev
+        run: |
+          echo "Getting initial stats..."
+          stats=$(curl -s "$API_URL/api/stats")
+          echo "Current stats: $stats"
+          echo "INITIAL_COUNT=$(echo "$stats" | jq -r '.total // 0')" >> $GITHUB_ENV
+
+      - name: Trigger import via API
+        env:
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          API_URL: https://sk-company-lookup.fly.dev
+        run: |
+          echo "Starting weekly RPO data import..."
+
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Admin-Key: $ADMIN_API_KEY" \
+            -d '{"mode": "full"}' \
+            "$API_URL/admin/import")
+
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+
+          echo "Response: $body"
+          echo "HTTP Code: $http_code"
+
+          if [ "$http_code" != "200" ]; then
+            echo "Import trigger failed with HTTP $http_code"
+            exit 1
+          fi
+
+          echo "✅ Import started successfully!"
+          echo "Import runs in background, waiting 30 minutes..."
+
+      - name: Wait for import to complete
+        run: |
+          echo "Waiting 30 minutes for import to complete..."
+          sleep 1800
+
+      - name: Verify data
+        env:
+          API_URL: https://sk-company-lookup.fly.dev
+        run: |
+          echo "Verifying imported data..."
+
+          stats=$(curl -s "$API_URL/api/stats")
+          total=$(echo "$stats" | jq -r '.total // 0')
+          active=$(echo "$stats" | jq -r '.active // 0')
+
+          echo "Initial count: ${{ env.INITIAL_COUNT }}"
+          echo "Current total: $total"
+          echo "Active companies: $active"
+
+          if [ "$total" -lt 1000000 ]; then
+            echo "⚠️ Warning: Less than 1M companies, checking if import completed..."
+
+            # Test a search to verify service is working
+            search=$(curl -s "$API_URL/api/search?q=tesco")
+            count=$(echo "$search" | jq -r '.count // 0')
+
+            if [ "$count" -gt 0 ]; then
+              echo "✅ Search working, service is healthy"
+            else
+              echo "❌ Search returned no results, import may have failed"
+              exit 1
+            fi
+          else
+            echo "✅ Data verification passed - $total companies"
+          fi
+
+          # Test search performance
+          echo ""
+          echo "Testing search performance..."
+          search=$(curl -s "$API_URL/api/search?q=bratislava")
+          timing=$(echo "$search" | jq -r '.timing // 0')
+          echo "Search timing: ${timing}ms"
