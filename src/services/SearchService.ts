@@ -1,4 +1,5 @@
 import { query } from './database.js';
+import { RuzService } from './RuzService.js';
 
 export interface CompanySearchResult {
   ico: string;
@@ -155,10 +156,27 @@ export class SearchService {
     }
 
     const row = result.rows[0];
+
+    // If we don't have DIČ, try to fetch it from RÚZ API
+    let dic = row.dic;
+    let icDph = row.ic_dph;
+
+    if (!dic) {
+      try {
+        const ruzData = await RuzService.getByIco(ico);
+        if (ruzData?.dic) {
+          dic = ruzData.dic;
+          icDph = `SK${dic}`;
+        }
+      } catch (error) {
+        console.error(`[Search] Failed to fetch DIČ from RÚZ for ${ico}:`, error);
+      }
+    }
+
     return {
       ico: row.ico,
-      dic: row.dic,
-      icDph: row.ic_dph,
+      dic,
+      icDph,
       name: row.name,
       legalForm: row.legal_form,
       address: {
