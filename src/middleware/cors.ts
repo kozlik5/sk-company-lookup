@@ -14,6 +14,8 @@ const ALLOWED_ORIGINS = [
 
   // TrustAPI
   'https://genesis-trustapi.fly.dev',
+  'https://trust-api.com',
+  'https://www.trust-api.com',
 
   // Add from environment (comma-separated)
   ...(process.env.ALLOWED_ORIGINS?.split(',').map(s => s.trim()) || [])
