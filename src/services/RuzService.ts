@@ -17,6 +17,7 @@ export interface RuzCompanyData {
   psc: string | null;
   datumZalozenia: string | null;
   pravnaForma: string | null;
+  velkostOrganizacie: string | null;
 }
 
 /**

@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { SearchService } from '../services/SearchService.js';
+import { RuzService } from '../services/RuzService.js';
+import { RpoService, RpoStakeholder } from '../services/RpoService.js';
 
 const router = Router();
 
@@ -34,7 +36,70 @@ router.get('/company/:ico', async (req: Request, res: Response) => {
       return;
     }
 
-    res.json(company);
+    // Run all additional lookups in PARALLEL for better performance
+    const [ruzData, rpoData, addressCount] = await Promise.all([
+      // RÚZ data (founding date, size)
+      RuzService.getByIco(paddedIco).catch(() => null),
+      // RPO stakeholders
+      RpoService.getPersons(paddedIco).catch(() => []),
+      // Virtual office detection (includes postal code for precise matching)
+      company.address.street && company.address.city
+        ? SearchService.countAtAddress(company.address.street, company.address.city, company.address.postalCode ?? undefined).catch(() => 0)
+        : Promise.resolve(0)
+    ]);
+
+    // Process RÚZ data
+    let foundedDate: string | null = null;
+    let ageMonths: number | null = null;
+    let sizeCode: string | null = null;
+    let sizeCategory: string | null = null;
+    let employeeRange: string | null = null;
+
+    if (ruzData?.datumZalozenia) {
+      foundedDate = ruzData.datumZalozenia;
+      const founded = new Date(ruzData.datumZalozenia);
+      const now = new Date();
+      ageMonths = (now.getFullYear() - founded.getFullYear()) * 12 +
+                  (now.getMonth() - founded.getMonth());
+    }
+    if (ruzData?.velkostOrganizacie) {
+      sizeCode = ruzData.velkostOrganizacie;
+      const code = parseInt(sizeCode, 10);
+      if (code === 0) {
+        sizeCategory = 'bez-zamestnancov';
+        employeeRange = '0';
+      } else if (code === 1) {
+        sizeCategory = 'mikro';
+        employeeRange = '1-9';
+      } else if (code <= 3) {
+        sizeCategory = 'mala';
+        employeeRange = '10-24';
+      } else if (code <= 6) {
+        sizeCategory = 'stredna';
+        employeeRange = '25-149';
+      } else {
+        sizeCategory = 'velka';
+        employeeRange = '150+';
+      }
+    }
+
+    const companiesAtAddress = addressCount;
+    const isVirtualOffice = companiesAtAddress > 50;
+    const stakeholders = rpoData;
+
+    res.json({
+      ...company,
+      foundedDate,
+      ageMonths,
+      isNew: ageMonths !== null && ageMonths < 12,
+      companiesAtAddress,
+      isVirtualOffice,
+      sizeCode,
+      sizeCategory,
+      employeeRange,
+      isMicro: sizeCategory === 'mikro' || sizeCategory === 'bez-zamestnancov',
+      stakeholders
+    });
   } catch (error) {
     console.error('[Company] Error:', error);
     res.status(500).json({

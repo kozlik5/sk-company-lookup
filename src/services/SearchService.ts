@@ -94,31 +94,63 @@ export class SearchService {
       `;
       params = [`${escapedQuery}%`, limit];
     } else {
-      // Name search - optimized for pg_trgm GIN index
+      // Name search - use fast prefix match first, fallback to trigram if needed
+      // First try prefix match (very fast with btree index)
       sql = `
         SELECT
           ico,
           name,
           legal_form as "legalForm",
           city,
-          is_active as "isActive",
-          similarity(name_normalized, $1) as sim
+          is_active as "isActive"
         FROM companies
-        WHERE name_normalized % $1
+        WHERE name_normalized LIKE $1
         ${includeInactive ? '' : 'AND is_active = true'}
-        ORDER BY sim DESC, name
+        ORDER BY name
         LIMIT $2
       `;
-      params = [normalizedQuery, limit];
+      params = [`${escapedQuery}%`, limit];
     }
 
-    const result = await query<{
+    let result = await query<{
       ico: string;
       name: string;
       legalForm: string | null;
       city: string | null;
       isActive: boolean;
     }>(sql, params);
+
+    // If prefix match returned few results and query is long enough, try trigram similarity
+    if (result.rows.length < 5 && normalizedQuery.length >= 4 && !/^\d+$/.test(searchQuery.trim())) {
+      const trigramResult = await query<{
+        ico: string;
+        name: string;
+        legalForm: string | null;
+        city: string | null;
+        isActive: boolean;
+      }>(`
+        SELECT
+          ico,
+          name,
+          legal_form as "legalForm",
+          city,
+          is_active as "isActive"
+        FROM companies
+        WHERE name_normalized % $1
+        ${includeInactive ? '' : 'AND is_active = true'}
+        ORDER BY similarity(name_normalized, $1) DESC, name
+        LIMIT $2
+      `, [normalizedQuery, limit]);
+
+      // Merge results, avoiding duplicates
+      const existingIcos = new Set(result.rows.map(r => r.ico));
+      for (const row of trigramResult.rows) {
+        if (!existingIcos.has(row.ico)) {
+          result.rows.push(row);
+          if (result.rows.length >= limit) break;
+        }
+      }
+    }
 
     return result.rows;
   }
@@ -210,5 +242,45 @@ export class SearchService {
       total: parseInt(result.rows[0].total, 10),
       active: parseInt(result.rows[0].active, 10)
     };
+  }
+
+  /**
+   * Count companies at the same address
+   * Used for virtual office detection
+   */
+  static async countAtAddress(street: string, city: string, postalCode?: string): Promise<number> {
+    if (!street || !city) {
+      return 0;
+    }
+
+    // Use exact match on street, city, and postal code (case-insensitive)
+    // Postal code provides additional precision to distinguish different addresses
+    let sql: string;
+    let params: string[];
+
+    if (postalCode) {
+      sql = `
+        SELECT COUNT(*) as count
+        FROM companies
+        WHERE LOWER(TRIM(street)) = LOWER(TRIM($1))
+          AND LOWER(TRIM(city)) = LOWER(TRIM($2))
+          AND LOWER(TRIM(postal_code)) = LOWER(TRIM($3))
+          AND is_active = true
+      `;
+      params = [street.trim(), city.trim(), postalCode.trim()];
+    } else {
+      sql = `
+        SELECT COUNT(*) as count
+        FROM companies
+        WHERE LOWER(TRIM(street)) = LOWER(TRIM($1))
+          AND LOWER(TRIM(city)) = LOWER(TRIM($2))
+          AND is_active = true
+      `;
+      params = [street.trim(), city.trim()];
+    }
+
+    const result = await query<{ count: string }>(sql, params);
+
+    return parseInt(result.rows[0].count, 10);
   }
 }
