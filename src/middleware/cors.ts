@@ -17,6 +17,11 @@ const ALLOWED_ORIGINS = [
   'https://trust-api.com',
   'https://www.trust-api.com',
 
+  // VoVreci
+  'https://app.vovreci.com',
+  'https://vovreci.com',
+  'https://www.vovreci.com',
+
   // Add from environment (comma-separated)
   ...(process.env.ALLOWED_ORIGINS?.split(',').map(s => s.trim()) || [])
 ].filter(Boolean);
@@ -29,6 +34,7 @@ function isAllowedOrigin(origin: string): boolean {
   try {
     const url = new URL(origin);
     if (url.hostname.endsWith('.genesis-b2b.pages.dev')) return true;
+    if (url.hostname.endsWith('.vovreci-on-the-go.pages.dev')) return true;
   } catch {
     // Invalid URL
   }
