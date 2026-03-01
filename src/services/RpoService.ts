@@ -21,6 +21,9 @@ export interface RpoCompanyData {
   ico: string;
   name: string;
   stakeholders: RpoStakeholder[];
+  statutoryBodies: RpoStakeholder[];
+  skNace: { code: string; description: string } | null;
+  activities: string[];
 }
 
 /**
@@ -156,11 +159,43 @@ export class RpoService {
         }
       }
 
+      // Extract statutory bodies (konatelia)
+      const statutoryBodies: RpoStakeholder[] = [];
+      const rawStatutory = (detail as any).statutoryBodies || [];
+      for (const s of rawStatutory) {
+        const parsed = parseStakeholder(s);
+        if (!parsed.validTo || parsed.validTo > new Date().toISOString().split('T')[0]) {
+          statutoryBodies.push(parsed);
+        }
+      }
+
+      // Extract SK NACE from statisticalCodes
+      let skNace: { code: string; description: string } | null = null;
+      const statCodes = (detail as any).statisticalCodes;
+      if (statCodes?.mainActivity) {
+        skNace = {
+          code: statCodes.mainActivity.code || '',
+          description: statCodes.mainActivity.value || '',
+        };
+      }
+
+      // Extract activities (predmet činnosti)
+      const activities: string[] = [];
+      const rawActivities = (detail as any).activities || [];
+      for (const a of rawActivities) {
+        if (a.economicActivityDescription && !a.validTo) {
+          activities.push(a.economicActivityDescription);
+        }
+      }
+
       const result: RpoCompanyData = {
         id: detail.id,
         ico,
         name: companyName,
         stakeholders,
+        statutoryBodies,
+        skNace,
+        activities,
       };
 
       // Cache the result

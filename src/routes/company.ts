@@ -85,7 +85,12 @@ router.get('/company/:ico', async (req: Request, res: Response) => {
 
     const companiesAtAddress = addressCount;
     const isVirtualOffice = companiesAtAddress > 50;
-    const stakeholders = rpoData;
+    // RPO full data
+    const rpoFull = await RpoService.getByIco(paddedIco).catch(() => null);
+    const stakeholders = rpoData; // active persons from getPersons()
+    const statutoryBodies = rpoFull?.statutoryBodies || [];
+    const skNace = rpoFull?.skNace || null;
+    const activities = rpoFull?.activities || [];
 
     res.json({
       ...company,
@@ -98,7 +103,10 @@ router.get('/company/:ico', async (req: Request, res: Response) => {
       sizeCategory,
       employeeRange,
       isMicro: sizeCategory === 'mikro' || sizeCategory === 'bez-zamestnancov',
-      stakeholders
+      stakeholders,
+      statutoryBodies,
+      skNace,
+      activities,
     });
   } catch (error) {
     console.error('[Company] Error:', error);
