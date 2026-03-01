@@ -17,6 +17,9 @@ const ALLOWED_ORIGINS = [
   'https://trust-api.com',
   'https://www.trust-api.com',
 
+  // Trust Insights Dashboard
+  'https://trust-insights-dashboard.pages.dev',
+
   // VoVreci
   'https://app.vovreci.com',
   'https://vovreci.com',
@@ -35,6 +38,7 @@ function isAllowedOrigin(origin: string): boolean {
     const url = new URL(origin);
     if (url.hostname.endsWith('.genesis-b2b.pages.dev')) return true;
     if (url.hostname.endsWith('.vovreci-on-the-go.pages.dev')) return true;
+    if (url.hostname.endsWith('.trust-insights-dashboard.pages.dev')) return true;
   } catch {
     // Invalid URL
   }
