@@ -7,8 +7,9 @@ import { createInterface } from 'readline';
 import { getPool, query } from './database.js';
 
 const RPO_DUMP_URL = 'https://s3.eu-central-1.amazonaws.com/ekosystem-slovensko-digital-dumps/rpo.sql.gz';
-const TEMP_FILE = '/tmp/rpo.sql.gz';
-const TEMP_SQL_FILE = '/tmp/rpo.sql';
+const DATA_DIR = process.env.DATA_DIR || '/tmp';
+const TEMP_FILE = `${DATA_DIR}/rpo.sql.gz`;
+const TEMP_SQL_FILE = `${DATA_DIR}/rpo.sql`;
 
 export interface ImportResult {
   success: boolean;
@@ -102,7 +103,9 @@ export class ImportService {
     const gunzip = createGunzip();
 
     await pipeline(source, gunzip, destination);
-    console.log('[Import] Decompression complete');
+    // Remove compressed file to free disk space before parsing
+    if (existsSync(TEMP_FILE)) unlinkSync(TEMP_FILE);
+    console.log('[Import] Decompression complete, .gz removed');
   }
 
   /**
