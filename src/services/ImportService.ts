@@ -4,6 +4,7 @@ import { createWriteStream, createReadStream, existsSync, unlinkSync } from 'fs'
 import { createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { createInterface } from 'readline';
+import { execSync } from 'child_process';
 import { getPool, query } from './database.js';
 
 const RPO_DUMP_URL = 'https://s3.eu-central-1.amazonaws.com/ekosystem-slovensko-digital-dumps/rpo.sql.gz';
@@ -97,12 +98,21 @@ export class ImportService {
    * Decompress the downloaded dump
    */
   static async decompressDump(): Promise<void> {
-    console.log('[Import] Decompressing dump...');
-    const source = createReadStream(TEMP_FILE);
-    const destination = createWriteStream(TEMP_SQL_FILE);
-    const gunzip = createGunzip();
-
-    await pipeline(source, gunzip, destination);
+    console.log('[Import] Decompressing dump (using system gunzip for low memory usage)...');
+    try {
+      // Use system gunzip — much lower memory than Node zlib streams for large files
+      execSync(`gunzip -c "${TEMP_FILE}" > "${TEMP_SQL_FILE}"`, {
+        stdio: 'inherit',
+        maxBuffer: 10 * 1024 * 1024,
+      });
+    } catch {
+      // Fallback to Node streams if gunzip not available
+      console.log('[Import] System gunzip failed, falling back to Node zlib...');
+      const source = createReadStream(TEMP_FILE);
+      const destination = createWriteStream(TEMP_SQL_FILE);
+      const gunzip = createGunzip();
+      await pipeline(source, gunzip, destination);
+    }
     // Remove compressed file to free disk space before parsing
     if (existsSync(TEMP_FILE)) unlinkSync(TEMP_FILE);
     console.log('[Import] Decompression complete, .gz removed');
