@@ -253,8 +253,22 @@ export class ImportService {
             values = `(${fields[1]}, ${esc(fields[2])}, ${fields[4] === '\\N' ? 'NULL' : esc(fields[4])})`;
             break;
           case 'organization_address_entries':
-            // organization_id, street, city, postal_code, effective_to
-            values = `(${fields[1]}, ${esc(fields[3])}, ${esc(fields[7])}, ${esc(fields[6])}, ${fields[10] === '\\N' ? 'NULL' : esc(fields[10])})`;
+            // organization_id, street (with building number), city, postal_code, effective_to
+            // fields[3]=street_name, fields[4]=building_number (súpisné), fields[5]=reg_number (orientačné)
+            {
+              const streetName = fields[3] === '\\N' ? '' : fields[3];
+              const buildNum = fields[4] === '\\N' ? '' : fields[4];
+              const regNum = fields[5] === '\\N' ? '' : fields[5];
+              let fullStreet = streetName;
+              if (buildNum && regNum) {
+                fullStreet = `${streetName} ${buildNum}/${regNum}`;
+              } else if (regNum) {
+                fullStreet = `${streetName} ${regNum}`;
+              } else if (buildNum) {
+                fullStreet = `${streetName} ${buildNum}`;
+              }
+              values = `(${fields[1]}, ${esc(fullStreet.trim())}, ${esc(fields[7])}, ${esc(fields[6])}, ${fields[10] === '\\N' ? 'NULL' : esc(fields[10])})`;
+            }
             break;
           case 'organization_legal_form_entries':
             // organization_id, legal_form_id, effective_to
