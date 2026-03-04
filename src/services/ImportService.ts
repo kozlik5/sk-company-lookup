@@ -455,11 +455,16 @@ export class ImportService {
     const startTime = Date.now();
 
     try {
-      // Download dump
-      await this.downloadDump();
+      // Skip download+decompress if SQL file already exists (resume after crash)
+      if (existsSync(TEMP_SQL_FILE)) {
+        console.log('[Import] Found existing SQL file, skipping download+decompress');
+      } else {
+        // Download dump
+        await this.downloadDump();
 
-      // Decompress
-      await this.decompressDump();
+        // Decompress
+        await this.decompressDump();
+      }
 
       // Parse and import
       const recordCount = await this.parseAndImport();
