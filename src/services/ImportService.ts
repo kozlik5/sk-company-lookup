@@ -267,18 +267,19 @@ export class ImportService {
             break;
           case 'organization_address_entries':
             // organization_id, street (with building number), city, postal_code, effective_to
-            // fields[3]=street_name, fields[4]=building_number (súpisné), fields[5]=reg_number (orientačné)
+            // RPO schema: [3]=street, [4]=reg_number (orientačné, INT), [5]=building_number (súpisné, VARCHAR)
+            // [6]=postal_code, [7]=municipality, ... [10]=effective_to
             {
               const streetName = fields[3] === '\\N' ? '' : fields[3];
-              const buildNum = fields[4] === '\\N' ? '' : fields[4];
-              const regNum = fields[5] === '\\N' ? '' : fields[5];
+              const regNum = fields[4] === '\\N' || fields[4] === '0' ? '' : fields[4];
+              const buildNum = fields[5] === '\\N' ? '' : fields[5];
               let fullStreet = streetName;
-              if (buildNum && regNum) {
-                fullStreet = `${streetName} ${buildNum}/${regNum}`;
-              } else if (regNum) {
-                fullStreet = `${streetName} ${regNum}`;
+              if (regNum && buildNum) {
+                fullStreet = `${streetName} ${regNum}/${buildNum}`;
               } else if (buildNum) {
                 fullStreet = `${streetName} ${buildNum}`;
+              } else if (regNum) {
+                fullStreet = `${streetName} ${regNum}`;
               }
               values = `(${fields[1]}, ${esc(fullStreet.trim())}, ${esc(fields[7])}, ${esc(fields[6])}, ${fields[10] === '\\N' ? 'NULL' : esc(fields[10])})`;
             }
