@@ -375,7 +375,7 @@ export class ImportService {
 
     // Create unique index on staging
     await query(`
-      CREATE UNIQUE INDEX idx_staging_ico ON companies_staging(ico);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_staging_ico ON companies_staging(ico);
     `);
 
     // Cleanup temporary tables
