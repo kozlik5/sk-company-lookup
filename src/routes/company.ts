@@ -118,6 +118,80 @@ router.get('/company/:ico', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/company-basic/:ico
+ *
+ * Lightweight company lookup — local DB + RÚZ only (no RPO API calls).
+ * Designed for trust-api DeepScan where speed matters more than stakeholder data.
+ * Typical response time: ~200ms vs ~3-5s for full /api/company/:ico
+ */
+router.get('/company-basic/:ico', async (req: Request, res: Response) => {
+  const { ico } = req.params;
+
+  if (!/^\d{1,8}$/.test(ico)) {
+    res.status(400).json({ error: 'invalid_ico', message: 'IČO must be 1-8 digits' });
+    return;
+  }
+
+  const paddedIco = ico.padStart(8, '0');
+
+  try {
+    const company = await SearchService.getByIco(paddedIco);
+
+    if (!company) {
+      res.status(404).json({ error: 'not_found', message: `Company with IČO ${paddedIco} not found` });
+      return;
+    }
+
+    // Only fetch RÚZ (for size/age) and address count — skip RPO entirely
+    const [ruzData, addressCount] = await Promise.all([
+      RuzService.getByIco(paddedIco).catch(() => null),
+      company.address.street && company.address.city
+        ? SearchService.countAtAddress(company.address.street, company.address.city, company.address.postalCode ?? undefined).catch(() => 0)
+        : Promise.resolve(0)
+    ]);
+
+    let foundedDate: string | null = null;
+    let ageMonths: number | null = null;
+    let sizeCategory: string | null = null;
+
+    if (ruzData?.datumZalozenia) {
+      foundedDate = ruzData.datumZalozenia;
+      const founded = new Date(ruzData.datumZalozenia);
+      const now = new Date();
+      ageMonths = (now.getFullYear() - founded.getFullYear()) * 12 + (now.getMonth() - founded.getMonth());
+    }
+    if (ruzData?.velkostOrganizacie) {
+      const code = parseInt(ruzData.velkostOrganizacie, 10);
+      if (code === 0) sizeCategory = 'bez-zamestnancov';
+      else if (code === 1) sizeCategory = 'mikro';
+      else if (code <= 3) sizeCategory = 'mala';
+      else if (code <= 6) sizeCategory = 'stredna';
+      else sizeCategory = 'velka';
+    }
+
+    const isVirtualOffice = addressCount > 50;
+
+    res.json({
+      ico: company.ico,
+      name: company.name,
+      legalForm: company.legalForm,
+      address: company.address,
+      isActive: company.isActive,
+      foundedDate,
+      ageMonths,
+      isNew: ageMonths !== null && ageMonths < 12,
+      companiesAtAddress: addressCount,
+      isVirtualOffice,
+      sizeCategory,
+      isMicro: sizeCategory === 'mikro' || sizeCategory === 'bez-zamestnancov',
+    });
+  } catch (error) {
+    console.error('[CompanyBasic] Error:', error);
+    res.status(500).json({ error: 'lookup_failed', message: 'Internal server error' });
+  }
+});
+
+/**
  * GET /api/stats
  *
  * Get database statistics
