@@ -21,6 +21,9 @@ const ALLOWED_ORIGINS = [
   'https://trust-insights-dashboard.pages.dev',
 
   // VoVreci
+  'https://vovreci.sk',
+  'https://www.vovreci.sk',
+  'https://app.vovreci.sk',
   'https://app.vovreci.com',
   'https://vovreci.com',
   'https://www.vovreci.com',
