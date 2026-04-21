@@ -15,7 +15,8 @@ export function getPool(): pg.Pool {
     pool = new Pool({
       connectionString,
       max: 10,
-      idleTimeoutMillis: 30000,
+      min: 1,
+      idleTimeoutMillis: 600000,
       connectionTimeoutMillis: 10000,
       ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined
     });
@@ -24,7 +25,17 @@ export function getPool(): pg.Pool {
       console.error('[Database] Unexpected error on idle client', err);
     });
 
-    console.log('[Database] Connection pool initialized');
+    const keepAliveMs = parseInt(process.env.KEEP_ALIVE_MS || '45000', 10);
+    if (keepAliveMs > 0 && process.env.NODE_ENV === 'production') {
+      setInterval(() => {
+        pool?.query('SELECT 1').catch((err) => {
+          console.error('[Database] Keep-alive ping failed:', err.message);
+        });
+      }, keepAliveMs).unref();
+      console.log(`[Database] Keep-alive ping every ${keepAliveMs}ms`);
+    }
+
+    console.log('[Database] Connection pool initialized (min=1, idle=10min)');
   }
 
   return pool;
