@@ -90,3 +90,17 @@ jobs:
           search=$(curl -s "$API_URL/api/search?q=bratislava")
           timing=$(echo "$search" | jq -r '.timing // 0')
           echo "Search timing: ${timing}ms"
+
+      - name: Verify NACE backfill
+        env:
+          API_URL: https://sk-company-lookup.fly.dev
+        run: |
+          echo "Verifying NACE backfill (43.91 = roofing)..."
+          nace=$(curl -s "$API_URL/api/companies/by-nace?codes=43.91&limit=1")
+          total=$(echo "$nace" | jq -r '.total // 0')
+          echo "Roofing firms (43.91): $total"
+          if [ "$total" -lt 100 ]; then
+            echo "❌ NACE backfill missing — fewer than 100 firms tagged 43.91"
+            exit 1
+          fi
+          echo "✅ NACE backfill OK"
