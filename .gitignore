@@ -25,6 +25,7 @@ npm-debug.log*
 /tmp/
 *.sql.gz
 *.sql
+!migrations/*.sql
 
 # Fly.io
 .fly/

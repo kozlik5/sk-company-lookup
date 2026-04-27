@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
@@ -23,13 +23,49 @@ async function runMigrations() {
     console.log('Connecting to database...');
     await client.connect();
 
-    console.log('Running migrations...');
+    // Bookkeeping table so we never apply the same file twice.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
 
-    // Read and execute migration file
-    const migrationPath = join(__dirname, '..', 'migrations', '001_companies.sql');
-    const migration = readFileSync(migrationPath, 'utf-8');
+    const migrationsDir = join(__dirname, '..', 'migrations');
+    if (!existsSync(migrationsDir)) {
+      console.log('No migrations directory; nothing to do.');
+      return;
+    }
 
-    await client.query(migration);
+    const files = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith('.sql'))
+      .sort(); // 001_, 002_, ... lexicographic order matches numeric order
+
+    if (files.length === 0) {
+      console.log('No migration files found.');
+      return;
+    }
+
+    const appliedRes = await client.query<{ filename: string }>(
+      'SELECT filename FROM schema_migrations'
+    );
+    const applied = new Set(appliedRes.rows.map((r) => r.filename));
+
+    for (const filename of files) {
+      if (applied.has(filename)) {
+        console.log(`Skip ${filename} (already applied)`);
+        continue;
+      }
+
+      console.log(`Applying ${filename}...`);
+      const sql = readFileSync(join(migrationsDir, filename), 'utf-8');
+      await client.query(sql);
+      await client.query(
+        'INSERT INTO schema_migrations (filename) VALUES ($1)',
+        [filename]
+      );
+      console.log(`  OK ${filename}`);
+    }
 
     console.log('Migrations completed successfully!');
   } catch (error) {
