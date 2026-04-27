@@ -135,6 +135,7 @@ export class ImportService {
       DROP TABLE IF EXISTS import_addresses CASCADE;
       DROP TABLE IF EXISTS import_legal_form_entries CASCADE;
       DROP TABLE IF EXISTS import_legal_forms CASCADE;
+      DROP TABLE IF EXISTS import_economic_activities CASCADE;
       DROP TABLE IF EXISTS companies_staging CASCADE;
 
       CREATE TABLE import_organizations (
@@ -171,6 +172,12 @@ export class ImportService {
       CREATE TABLE import_legal_forms (
         id INTEGER PRIMARY KEY,
         name VARCHAR(200)
+      );
+
+      CREATE TABLE import_economic_activities (
+        organization_id INTEGER,
+        nace_code VARCHAR(20),
+        effective_to DATE
       );
     `);
 
@@ -229,6 +236,13 @@ export class ImportService {
         } else if (currentTable === 'legal_forms') {
           targetTable = 'import_legal_forms';
           insertColumns = 'id, name';
+        } else if (
+          currentTable === 'organization_economic_activity_entries' ||
+          currentTable === 'economic_activity_entries' ||
+          currentTable === 'organization_economic_activities'
+        ) {
+          targetTable = 'import_economic_activities';
+          insertColumns = 'organization_id, nace_code, effective_to';
         } else {
           targetTable = null;
         }
@@ -291,6 +305,26 @@ export class ImportService {
           case 'legal_forms':
             values = `(${fields[0]}, ${esc(fields[1])})`;
             break;
+          case 'organization_economic_activity_entries':
+          case 'economic_activity_entries':
+          case 'organization_economic_activities':
+            // Mirrors organization_legal_form_entries shape:
+            //   [0]=id, [1]=organization_id, [2]=code (NACE/SK NACE),
+            //   [3]=description (skipped), [4]=effective_to (or valid_to).
+            // Effective row only — we filter effective_to IS NULL later.
+            {
+              const orgId = fields[1];
+              const code = fields[2];
+              const effectiveTo = fields[4];
+              if (orgId && /^\d+$/.test(orgId) && code && code !== '\\N') {
+                values = `(${orgId}, ${esc(code)}, ${
+                  effectiveTo === '\\N' || effectiveTo === undefined
+                    ? 'NULL'
+                    : esc(effectiveTo)
+                })`;
+              }
+            }
+            break;
         }
 
         if (values) {
@@ -317,6 +351,7 @@ export class ImportService {
       CREATE INDEX idx_import_names_org ON import_names(organization_id);
       CREATE INDEX idx_import_addresses_org ON import_addresses(organization_id);
       CREATE INDEX idx_import_legal_form_entries_org ON import_legal_form_entries(organization_id);
+      CREATE INDEX idx_import_economic_activities_org ON import_economic_activities(organization_id);
     `);
 
     // Now join tables and create companies
@@ -335,6 +370,7 @@ export class ImportService {
         city TEXT,
         postal_code VARCHAR(20),
         country VARCHAR(50) DEFAULT 'Slovensko',
+        nace_codes TEXT[],
         is_active BOOLEAN DEFAULT true,
         imported_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -342,10 +378,20 @@ export class ImportService {
     `);
 
     const insertResult = await query(`
+      WITH nace_per_org AS (
+        SELECT
+          organization_id,
+          ARRAY_AGG(DISTINCT nace_code ORDER BY nace_code) AS codes
+        FROM import_economic_activities
+        WHERE effective_to IS NULL
+          AND nace_code IS NOT NULL
+          AND nace_code <> ''
+        GROUP BY organization_id
+      )
       INSERT INTO companies_staging (
         ico, dic, ic_dph, name, name_normalized,
         legal_form, street, city, postal_code, country,
-        is_active
+        nace_codes, is_active
       )
       SELECT DISTINCT ON (i.ico)
         i.ico,
@@ -358,6 +404,7 @@ export class ImportService {
         a.city,
         a.postal_code,
         'Slovensko' as country,
+        npo.codes as nace_codes,
         (o.terminated_on IS NULL) as is_active
       FROM import_identifiers i
       JOIN import_names n ON n.organization_id = i.organization_id AND n.effective_to IS NULL
@@ -365,6 +412,7 @@ export class ImportService {
       LEFT JOIN import_addresses a ON a.organization_id = i.organization_id AND a.effective_to IS NULL
       LEFT JOIN import_legal_form_entries lfe ON lfe.organization_id = i.organization_id AND lfe.effective_to IS NULL
       LEFT JOIN import_legal_forms lf ON lf.id = lfe.legal_form_id
+      LEFT JOIN nace_per_org npo ON npo.organization_id = i.organization_id
       WHERE i.effective_to IS NULL
         AND i.ico IS NOT NULL
         AND n.name IS NOT NULL
@@ -388,6 +436,7 @@ export class ImportService {
       DROP TABLE IF EXISTS import_addresses CASCADE;
       DROP TABLE IF EXISTS import_legal_form_entries CASCADE;
       DROP TABLE IF EXISTS import_legal_forms CASCADE;
+      DROP TABLE IF EXISTS import_economic_activities CASCADE;
     `);
 
     return recordCount;
@@ -443,6 +492,7 @@ export class ImportService {
     await query(`
       CREATE INDEX IF NOT EXISTS idx_companies_name_trgm ON companies USING GIN (name_normalized gin_trgm_ops);
       CREATE INDEX IF NOT EXISTS idx_companies_ico ON companies (ico text_pattern_ops);
+      CREATE INDEX IF NOT EXISTS idx_companies_nace_gin ON companies USING GIN (nace_codes);
     `);
 
     console.log('[Import] Tables swapped successfully');
