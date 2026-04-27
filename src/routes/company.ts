@@ -207,6 +207,101 @@ router.get('/company-basic/:ico', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/companies/by-nace
+ *
+ * Filter companies by NACE Rev. 2 economic activity codes (e.g. 43.91 = roofing).
+ * Backed by GIN index on companies.nace_codes for fast `&&` containment.
+ *
+ * Query params:
+ * - codes: comma-separated NACE codes, required (e.g. "43.91,43.21")
+ * - active: "true" (default) | "false" — when true, only is_active rows
+ * - limit: 1..50000, default 1000
+ * - offset: pagination offset, default 0
+ *
+ * Response:
+ * { total: number, results: Array<{ico, name, city, postalCode, naceCodes, isActive}> }
+ */
+router.get('/companies/by-nace', async (req: Request, res: Response) => {
+  const codesRaw = String(req.query.codes || '').trim();
+  if (!codesRaw) {
+    res.status(400).json({
+      error: 'invalid_query',
+      message: 'codes parameter is required (comma-separated NACE codes, e.g. 43.91,43.21)',
+    });
+    return;
+  }
+
+  const codes = codesRaw
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean)
+    // basic shape: digits with optional dot, e.g. "43", "43.91", "4391"
+    .filter((c) => /^[0-9]{1,2}(\.[0-9]{1,2})?$/.test(c) || /^[0-9]{2,5}$/.test(c));
+
+  if (codes.length === 0) {
+    res.status(400).json({
+      error: 'invalid_query',
+      message: 'No valid NACE codes after parsing (expected like 43.91 or 4391)',
+    });
+    return;
+  }
+
+  const activeOnly = String(req.query.active || 'true') !== 'false';
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 1000, 1), 50000);
+  const offset = Math.max(parseInt(String(req.query.offset)) || 0, 0);
+
+  try {
+    // Two-step: total count + page slice. Run in parallel.
+    const countSql = `
+      SELECT COUNT(*)::bigint AS total
+      FROM companies
+      WHERE nace_codes && $1::text[]
+        ${activeOnly ? 'AND is_active = true' : ''}
+    `;
+    const dataSql = `
+      SELECT
+        ico,
+        name,
+        city,
+        postal_code AS "postalCode",
+        nace_codes  AS "naceCodes",
+        is_active   AS "isActive"
+      FROM companies
+      WHERE nace_codes && $1::text[]
+        ${activeOnly ? 'AND is_active = true' : ''}
+      ORDER BY ico
+      LIMIT $2 OFFSET $3
+    `;
+
+    const [countRes, dataRes] = await Promise.all([
+      query<{ total: string }>(countSql, [codes]),
+      query<{
+        ico: string;
+        name: string;
+        city: string | null;
+        postalCode: string | null;
+        naceCodes: string[] | null;
+        isActive: boolean;
+      }>(dataSql, [codes, limit, offset]),
+    ]);
+
+    res.json({
+      total: parseInt(countRes.rows[0].total, 10),
+      limit,
+      offset,
+      codes,
+      results: dataRes.rows,
+    });
+  } catch (error) {
+    console.error('[CompaniesByNace] Error:', error);
+    res.status(500).json({
+      error: 'lookup_failed',
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
  * GET /api/stats
  *
  * Get database statistics
