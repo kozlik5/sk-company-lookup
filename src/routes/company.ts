@@ -302,6 +302,107 @@ router.get('/companies/by-nace', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/companies/by-trade
+ *
+ * Filter companies by free-text trade keywords matched against the
+ * `companies.nace_codes` array (which holds activity descriptions, not
+ * structured codes — RPO opendata only stores free text).
+ *
+ * Query params:
+ * - keywords: comma-separated keyword stems, required
+ *   (e.g. "pokrývač,strech,klampiar"). Each is wrapped as `%kw%` ILIKE.
+ * - active: "true" (default) | "false"
+ * - limit: 1..50000, default 1000
+ * - offset: pagination offset, default 0
+ *
+ * Response:
+ * { total, limit, offset, keywords, results: [{ico, name, city, postalCode, naceCodes, isActive}] }
+ */
+router.get('/companies/by-trade', async (req: Request, res: Response) => {
+  const keywordsRaw = String(req.query.keywords || '').trim();
+  if (!keywordsRaw) {
+    res.status(400).json({
+      error: 'invalid_query',
+      message: 'keywords parameter is required (comma-separated, e.g. pokrývač,strech)',
+    });
+    return;
+  }
+
+  const keywords = keywordsRaw
+    .split(',')
+    .map((k) => k.trim())
+    .filter((k) => k.length >= 3 && k.length <= 60);
+
+  if (keywords.length === 0) {
+    res.status(400).json({
+      error: 'invalid_query',
+      message: 'No valid keywords (each must be 3-60 chars after trim)',
+    });
+    return;
+  }
+
+  const patterns = keywords.map((k) => `%${k}%`);
+  const activeOnly = String(req.query.active || 'true') !== 'false';
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 1000, 1), 50000);
+  const offset = Math.max(parseInt(String(req.query.offset)) || 0, 0);
+
+  try {
+    const countSql = `
+      SELECT COUNT(*)::bigint AS total
+      FROM companies
+      WHERE EXISTS (
+        SELECT 1 FROM unnest(nace_codes) AS d
+        WHERE d ILIKE ANY($1::text[])
+      )
+        ${activeOnly ? 'AND is_active = true' : ''}
+    `;
+    const dataSql = `
+      SELECT
+        ico,
+        name,
+        city,
+        postal_code AS "postalCode",
+        nace_codes  AS "naceCodes",
+        is_active   AS "isActive"
+      FROM companies
+      WHERE EXISTS (
+        SELECT 1 FROM unnest(nace_codes) AS d
+        WHERE d ILIKE ANY($1::text[])
+      )
+        ${activeOnly ? 'AND is_active = true' : ''}
+      ORDER BY ico
+      LIMIT $2 OFFSET $3
+    `;
+
+    const [countRes, dataRes] = await Promise.all([
+      query<{ total: string }>(countSql, [patterns]),
+      query<{
+        ico: string;
+        name: string;
+        city: string | null;
+        postalCode: string | null;
+        naceCodes: string[] | null;
+        isActive: boolean;
+      }>(dataSql, [patterns, limit, offset]),
+    ]);
+
+    res.json({
+      total: parseInt(countRes.rows[0].total, 10),
+      limit,
+      offset,
+      keywords,
+      results: dataRes.rows,
+    });
+  } catch (error) {
+    console.error('[CompaniesByTrade] Error:', error);
+    res.status(500).json({
+      error: 'lookup_failed',
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
  * GET /api/stats
  *
  * Get database statistics

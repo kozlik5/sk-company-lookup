@@ -176,7 +176,7 @@ export class ImportService {
 
       CREATE TABLE import_economic_activities (
         organization_id INTEGER,
-        nace_code VARCHAR(20),
+        description TEXT,
         effective_to DATE
       );
     `);
@@ -242,7 +242,7 @@ export class ImportService {
           currentTable === 'organization_economic_activities'
         ) {
           targetTable = 'import_economic_activities';
-          insertColumns = 'organization_id, nace_code, effective_to';
+          insertColumns = 'organization_id, description, effective_to';
         } else {
           targetTable = null;
         }
@@ -381,11 +381,11 @@ export class ImportService {
       WITH nace_per_org AS (
         SELECT
           organization_id,
-          ARRAY_AGG(DISTINCT nace_code ORDER BY nace_code) AS codes
+          ARRAY_AGG(DISTINCT description ORDER BY description) AS codes
         FROM import_economic_activities
         WHERE effective_to IS NULL
-          AND nace_code IS NOT NULL
-          AND nace_code <> ''
+          AND description IS NOT NULL
+          AND description <> ''
         GROUP BY organization_id
       )
       INSERT INTO companies_staging (

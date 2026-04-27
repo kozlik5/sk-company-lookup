@@ -91,16 +91,16 @@ jobs:
           timing=$(echo "$search" | jq -r '.timing // 0')
           echo "Search timing: ${timing}ms"
 
-      - name: Verify NACE backfill
+      - name: Verify activity-description backfill
         env:
           API_URL: https://sk-company-lookup.fly.dev
         run: |
-          echo "Verifying NACE backfill (43.91 = roofing)..."
-          nace=$(curl -s "$API_URL/api/companies/by-nace?codes=43.91&limit=1")
-          total=$(echo "$nace" | jq -r '.total // 0')
-          echo "Roofing firms (43.91): $total"
+          echo "Verifying activity description backfill via /api/companies/by-trade (RPO has no NACE codes, only free-text descriptions — see ImportService comment)..."
+          trade=$(curl -s "$API_URL/api/companies/by-trade?keywords=stavebn%C3%A9&limit=1")
+          total=$(echo "$trade" | jq -r '.total // 0')
+          echo "Firms with 'stavebné' in activity description: $total"
           if [ "$total" -lt 100 ]; then
-            echo "❌ NACE backfill missing — fewer than 100 firms tagged 43.91"
+            echo "❌ Activity backfill missing — fewer than 100 firms with stavebné keyword"
             exit 1
           fi
-          echo "✅ NACE backfill OK"
+          echo "✅ Activity description backfill OK"
