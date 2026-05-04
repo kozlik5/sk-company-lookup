@@ -136,11 +136,13 @@ export class ImportService {
       DROP TABLE IF EXISTS import_legal_form_entries CASCADE;
       DROP TABLE IF EXISTS import_legal_forms CASCADE;
       DROP TABLE IF EXISTS import_economic_activities CASCADE;
+      DROP TABLE IF EXISTS import_main_activities CASCADE;
       DROP TABLE IF EXISTS companies_staging CASCADE;
 
       CREATE TABLE import_organizations (
         id INTEGER PRIMARY KEY,
-        terminated_on DATE
+        terminated_on DATE,
+        main_activity_code_id INTEGER
       );
 
       CREATE TABLE import_identifiers (
@@ -178,6 +180,11 @@ export class ImportService {
         organization_id INTEGER,
         description TEXT,
         effective_to DATE
+      );
+
+      CREATE TABLE import_main_activities (
+        id INTEGER PRIMARY KEY,
+        name TEXT
       );
     `);
 
@@ -220,7 +227,10 @@ export class ImportService {
         // Map source tables to import tables
         if (currentTable === 'organizations') {
           targetTable = 'import_organizations';
-          insertColumns = 'id, terminated_on';
+          insertColumns = 'id, terminated_on, main_activity_code_id';
+        } else if (currentTable === 'main_activity_codes') {
+          targetTable = 'import_main_activities';
+          insertColumns = 'id, name';
         } else if (currentTable === 'organization_identifier_entries') {
           targetTable = 'import_identifiers';
           insertColumns = 'organization_id, ico, effective_to';
@@ -269,7 +279,11 @@ export class ImportService {
 
         switch (currentTable) {
           case 'organizations':
-            values = `(${fields[0]}, ${fields[2] === '\\N' ? 'NULL' : esc(fields[2])})`;
+            // [0]=id, [2]=terminated_on, [9]=main_activity_code_id (FK -> main_activity_codes.id)
+            values = `(${fields[0]}, ${fields[2] === '\\N' ? 'NULL' : esc(fields[2])}, ${fields[9] === '\\N' || fields[9] === undefined ? 'NULL' : fields[9]})`;
+            break;
+          case 'main_activity_codes':
+            values = `(${fields[0]}, ${esc(fields[1])})`;
             break;
           case 'organization_identifier_entries':
             // organization_id, ico, effective_to
@@ -377,16 +391,23 @@ export class ImportService {
       );
     `);
 
+    // NACE code source: organizations.main_activity_code_id -> main_activity_codes.id
+    // Source IDs are 4-5 digit packed NACE (e.g. 43910 = 43.91, 5812 = 58.12).
+    // We expose two array elements per company: structured "XX.XX" (for by-nace
+    // exact-match queries) and the human-readable Slovak name (for by-trade ILIKE).
     const insertResult = await query(`
       WITH nace_per_org AS (
         SELECT
-          organization_id,
-          ARRAY_AGG(DISTINCT description ORDER BY description) AS codes
-        FROM import_economic_activities
-        WHERE effective_to IS NULL
-          AND description IS NOT NULL
-          AND description <> ''
-        GROUP BY organization_id
+          o.id AS organization_id,
+          ARRAY[
+            SUBSTRING(LPAD(mac.id::text, 5, '0') FROM 1 FOR 2)
+              || '.' ||
+            SUBSTRING(LPAD(mac.id::text, 5, '0') FROM 3 FOR 2),
+            mac.name
+          ] AS codes
+        FROM import_organizations o
+        JOIN import_main_activities mac ON mac.id = o.main_activity_code_id
+        WHERE o.main_activity_code_id IS NOT NULL
       )
       INSERT INTO companies_staging (
         ico, dic, ic_dph, name, name_normalized,
@@ -437,6 +458,7 @@ export class ImportService {
       DROP TABLE IF EXISTS import_legal_form_entries CASCADE;
       DROP TABLE IF EXISTS import_legal_forms CASCADE;
       DROP TABLE IF EXISTS import_economic_activities CASCADE;
+      DROP TABLE IF EXISTS import_main_activities CASCADE;
     `);
 
     return recordCount;
