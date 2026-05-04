@@ -358,9 +358,12 @@ export class ImportService {
     await insertBatch();
     console.log(`[Import] Streamed ${lineCount} lines to temporary tables`);
 
-    // Create indexes on temporary tables
+    // Create indexes on temporary tables.
+    // SET statement_timeout=0 to override Supabase's default 120s — the join+insert
+    // of ~1.7M orgs against multiple staging tables takes 3-5 minutes total.
     console.log('[Import] Creating indexes...');
     await query(`
+      SET statement_timeout = 0;
       CREATE INDEX idx_import_identifiers_org ON import_identifiers(organization_id);
       CREATE INDEX idx_import_names_org ON import_names(organization_id);
       CREATE INDEX idx_import_addresses_org ON import_addresses(organization_id);
@@ -396,6 +399,7 @@ export class ImportService {
     // We expose two array elements per company: structured "XX.XX" (for by-nace
     // exact-match queries) and the human-readable Slovak name (for by-trade ILIKE).
     const insertResult = await query(`
+      SET statement_timeout = 0;
       WITH nace_per_org AS (
         SELECT
           o.id AS organization_id,
@@ -445,6 +449,7 @@ export class ImportService {
 
     // Create unique index on staging
     await query(`
+      SET statement_timeout = 0;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_staging_ico ON companies_staging(ico);
     `);
 
@@ -512,6 +517,7 @@ export class ImportService {
 
     // Recreate indexes on new table
     await query(`
+      SET statement_timeout = 0;
       CREATE INDEX IF NOT EXISTS idx_companies_name_trgm ON companies USING GIN (name_normalized gin_trgm_ops);
       CREATE INDEX IF NOT EXISTS idx_companies_ico ON companies (ico text_pattern_ops);
       CREATE INDEX IF NOT EXISTS idx_companies_nace_gin ON companies USING GIN (nace_codes);
