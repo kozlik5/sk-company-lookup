@@ -5,6 +5,7 @@ import { createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { createInterface } from 'readline';
 import { execSync } from 'child_process';
+import type pg from 'pg';
 import { getPool, query } from './database.js';
 
 const RPO_DUMP_URL = 'https://s3.eu-central-1.amazonaws.com/ekosystem-slovensko-digital-dumps/rpo.sql.gz';
@@ -30,6 +31,28 @@ function removeDiacritics(str: string): string {
 }
 
 export class ImportService {
+  /**
+   * Run a heavy SQL block on a dedicated client with statement_timeout disabled.
+   * Wraps the work in BEGIN..COMMIT so SET LOCAL applies through the whole block,
+   * even when the connection goes through Supabase's transaction-mode pooler.
+   * Multi-statement text is supported (semicolons inside the block).
+   */
+  static async runWithoutTimeout(text: string): Promise<pg.QueryResult> {
+    const client = await getPool().connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SET LOCAL statement_timeout = 0");
+      const result = await client.query(text);
+      await client.query('COMMIT');
+      return result;
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   /**
    * Download RPO dump from Slovensko.Digital
    */
@@ -359,11 +382,13 @@ export class ImportService {
     console.log(`[Import] Streamed ${lineCount} lines to temporary tables`);
 
     // Create indexes on temporary tables.
-    // SET statement_timeout=0 to override Supabase's default 120s — the join+insert
-    // of ~1.7M orgs against multiple staging tables takes 3-5 minutes total.
+    // We run heavy DDL/INSERT inside an explicit transaction with SET LOCAL
+    // statement_timeout=0. Plain "SET" via pool.query() doesn't survive
+    // through Supabase's transaction-pooler (next statement may land on a
+    // different backend), so SET LOCAL inside BEGIN..COMMIT is the only
+    // reliable override.
     console.log('[Import] Creating indexes...');
-    await query(`
-      SET statement_timeout = 0;
+    await ImportService.runWithoutTimeout(`
       CREATE INDEX idx_import_identifiers_org ON import_identifiers(organization_id);
       CREATE INDEX idx_import_names_org ON import_names(organization_id);
       CREATE INDEX idx_import_addresses_org ON import_addresses(organization_id);
@@ -398,8 +423,7 @@ export class ImportService {
     // Source IDs are 4-5 digit packed NACE (e.g. 43910 = 43.91, 5812 = 58.12).
     // We expose two array elements per company: structured "XX.XX" (for by-nace
     // exact-match queries) and the human-readable Slovak name (for by-trade ILIKE).
-    const insertResult = await query(`
-      SET statement_timeout = 0;
+    const insertResult = await ImportService.runWithoutTimeout(`
       WITH nace_per_org AS (
         SELECT
           o.id AS organization_id,
@@ -448,8 +472,7 @@ export class ImportService {
     console.log(`[Import] Inserted ${recordCount} companies`);
 
     // Create unique index on staging
-    await query(`
-      SET statement_timeout = 0;
+    await ImportService.runWithoutTimeout(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_staging_ico ON companies_staging(ico);
     `);
 
@@ -516,8 +539,7 @@ export class ImportService {
     `);
 
     // Recreate indexes on new table
-    await query(`
-      SET statement_timeout = 0;
+    await ImportService.runWithoutTimeout(`
       CREATE INDEX IF NOT EXISTS idx_companies_name_trgm ON companies USING GIN (name_normalized gin_trgm_ops);
       CREATE INDEX IF NOT EXISTS idx_companies_ico ON companies (ico text_pattern_ops);
       CREATE INDEX IF NOT EXISTS idx_companies_nace_gin ON companies USING GIN (nace_codes);
