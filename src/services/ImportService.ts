@@ -423,52 +423,75 @@ export class ImportService {
     // Source IDs are 4-5 digit packed NACE (e.g. 43910 = 43.91, 5812 = 58.12).
     // We expose two array elements per company: structured "XX.XX" (for by-nace
     // exact-match queries) and the human-readable Slovak name (for by-trade ILIKE).
-    const insertResult = await ImportService.runWithoutTimeout(`
-      WITH nace_per_org AS (
-        SELECT
-          o.id AS organization_id,
-          ARRAY[
-            SUBSTRING(LPAD(mac.id::text, 5, '0') FROM 1 FOR 2)
-              || '.' ||
-            SUBSTRING(LPAD(mac.id::text, 5, '0') FROM 3 FOR 2),
-            mac.name
-          ] AS codes
-        FROM import_organizations o
-        JOIN import_main_activities mac ON mac.id = o.main_activity_code_id
-        WHERE o.main_activity_code_id IS NOT NULL
-      )
-      INSERT INTO companies_staging (
-        ico, dic, ic_dph, name, name_normalized,
-        legal_form, street, city, postal_code, country,
-        nace_codes, is_active
-      )
-      SELECT DISTINCT ON (i.ico)
-        i.ico,
-        NULL as dic,
-        NULL as ic_dph,
-        n.name,
-        LOWER(TRANSLATE(n.name, 'áäčďéěíľĺňóôöŕřšťúůüýžÁÄČĎÉĚÍĽĹŇÓÔÖŔŘŠŤÚŮÜÝŽ', 'aacdeeilnooorrstuuuyzAACDEEILLNOOORRSTUUUYZ')) as name_normalized,
-        lf.name as legal_form,
-        a.street,
-        a.city,
-        a.postal_code,
-        'Slovensko' as country,
-        npo.codes as nace_codes,
-        (o.terminated_on IS NULL) as is_active
-      FROM import_identifiers i
-      JOIN import_names n ON n.organization_id = i.organization_id AND n.effective_to IS NULL
-      LEFT JOIN import_organizations o ON o.id = i.organization_id
-      LEFT JOIN import_addresses a ON a.organization_id = i.organization_id AND a.effective_to IS NULL
-      LEFT JOIN import_legal_form_entries lfe ON lfe.organization_id = i.organization_id AND lfe.effective_to IS NULL
-      LEFT JOIN import_legal_forms lf ON lf.id = lfe.legal_form_id
-      LEFT JOIN nace_per_org npo ON npo.organization_id = i.organization_id
-      WHERE i.effective_to IS NULL
-        AND i.ico IS NOT NULL
-        AND n.name IS NOT NULL
-      ORDER BY i.ico, n.name
+    //
+    // The full JOIN+INSERT over ~1.7M orgs takes 3-5 minutes. Supavisor (Supabase
+    // pooler) enforces a hard 120s server-side timeout we cannot override from the
+    // client even with SET LOCAL — so we chunk by organization_id ranges so each
+    // chunk's INSERT comfortably fits inside that ceiling.
+    const CHUNK_SIZE = 100000;
+    const orgRangeRes = await ImportService.runWithoutTimeout(`
+      SELECT COALESCE(MIN(id), 0)::int AS min_id, COALESCE(MAX(id), 0)::int AS max_id
+      FROM import_organizations
     `);
+    const minId = (orgRangeRes.rows[0] as { min_id: number }).min_id;
+    const maxId = (orgRangeRes.rows[0] as { max_id: number }).max_id;
+    console.log(`[Import] Inserting companies in chunks: organization_id ${minId}..${maxId}, chunk=${CHUNK_SIZE}`);
 
-    const recordCount = insertResult.rowCount || 0;
+    let recordCount = 0;
+    for (let start = minId; start <= maxId; start += CHUNK_SIZE) {
+      const end = start + CHUNK_SIZE;
+      const chunkRes = await ImportService.runWithoutTimeout(`
+        WITH nace_per_org AS (
+          SELECT
+            o.id AS organization_id,
+            ARRAY[
+              SUBSTRING(LPAD(mac.id::text, 5, '0') FROM 1 FOR 2)
+                || '.' ||
+              SUBSTRING(LPAD(mac.id::text, 5, '0') FROM 3 FOR 2),
+              mac.name
+            ] AS codes
+          FROM import_organizations o
+          JOIN import_main_activities mac ON mac.id = o.main_activity_code_id
+          WHERE o.main_activity_code_id IS NOT NULL
+            AND o.id >= ${start} AND o.id < ${end}
+        )
+        INSERT INTO companies_staging (
+          ico, dic, ic_dph, name, name_normalized,
+          legal_form, street, city, postal_code, country,
+          nace_codes, is_active
+        )
+        SELECT DISTINCT ON (i.ico)
+          i.ico,
+          NULL as dic,
+          NULL as ic_dph,
+          n.name,
+          LOWER(TRANSLATE(n.name, 'áäčďéěíľĺňóôöŕřšťúůüýžÁÄČĎÉĚÍĽĹŇÓÔÖŔŘŠŤÚŮÜÝŽ', 'aacdeeilnooorrstuuuyzAACDEEILLNOOORRSTUUUYZ')) as name_normalized,
+          lf.name as legal_form,
+          a.street,
+          a.city,
+          a.postal_code,
+          'Slovensko' as country,
+          npo.codes as nace_codes,
+          (o.terminated_on IS NULL) as is_active
+        FROM import_identifiers i
+        JOIN import_names n ON n.organization_id = i.organization_id AND n.effective_to IS NULL
+        JOIN import_organizations o
+          ON o.id = i.organization_id
+          AND o.id >= ${start} AND o.id < ${end}
+        LEFT JOIN import_addresses a ON a.organization_id = i.organization_id AND a.effective_to IS NULL
+        LEFT JOIN import_legal_form_entries lfe ON lfe.organization_id = i.organization_id AND lfe.effective_to IS NULL
+        LEFT JOIN import_legal_forms lf ON lf.id = lfe.legal_form_id
+        LEFT JOIN nace_per_org npo ON npo.organization_id = i.organization_id
+        WHERE i.effective_to IS NULL
+          AND i.ico IS NOT NULL
+          AND n.name IS NOT NULL
+        ORDER BY i.ico, n.name
+        ON CONFLICT (ico) DO NOTHING
+      `);
+      const chunkCount = chunkRes.rowCount || 0;
+      recordCount += chunkCount;
+      console.log(`[Import] Chunk ${start}-${end}: inserted ${chunkCount} (total ${recordCount})`);
+    }
     console.log(`[Import] Inserted ${recordCount} companies`);
 
     // Create unique index on staging
