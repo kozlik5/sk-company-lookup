@@ -120,8 +120,10 @@ export class SearchService {
       isActive: boolean;
     }>(sql, params);
 
-    // If prefix match returned few results and query is long enough, try trigram similarity
-    if (result.rows.length < 5 && normalizedQuery.length >= 4 && !/^\d+$/.test(searchQuery.trim())) {
+    // Trigram fallback only when prefix match returned 0 results.
+    // Previous threshold (<5) caused 70%+ extra trigram scans on debtors-shared DB,
+    // exhausting Disk IO Budget. Most enrichment queries are exact prefix matches.
+    if (result.rows.length === 0 && normalizedQuery.length >= 4 && !/^\d+$/.test(searchQuery.trim())) {
       const trigramResult = await query<{
         ico: string;
         name: string;
