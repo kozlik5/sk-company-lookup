@@ -550,6 +550,38 @@ export class ImportService {
   }
 
   /**
+   * Record newly-observed IČOs into seen_icos after a successful import.
+   *
+   * `companies` is rebuilt from scratch each run, so we cannot derive
+   * "appeared this week" from companies.imported_at. seen_icos is an
+   * append-only ledger: each ICO gets stamped with the date it first
+   * showed up in any import.
+   *
+   * On first deploy, this also doubles as the backfill — every current
+   * ICO lands with first_seen = today, so the first weekly digest sees
+   * 0 "new" entries rather than ~1.1M.
+   */
+  static async recordNewIcos(): Promise<number> {
+    console.log('[Import] Recording new ICOs into seen_icos...');
+    const result = await ImportService.runWithoutTimeout(`
+      INSERT INTO seen_icos (ico, first_seen, legal_form, name, city, nace_codes)
+      SELECT
+        c.ico,
+        CURRENT_DATE,
+        c.legal_form,
+        c.name,
+        c.city,
+        c.nace_codes
+      FROM companies c
+      LEFT JOIN seen_icos s ON s.ico = c.ico
+      WHERE s.ico IS NULL
+    `);
+    const inserted = result.rowCount || 0;
+    console.log(`[Import] Recorded ${inserted} new ICOs`);
+    return inserted;
+  }
+
+  /**
    * Swap staging table with production table
    */
   static async swapTables(): Promise<void> {
@@ -594,6 +626,9 @@ export class ImportService {
 
       // Swap tables
       await this.swapTables();
+
+      // Record any newly-seen ICOs into the append-only ledger
+      await this.recordNewIcos();
 
       // Cleanup temp files
       if (existsSync(TEMP_FILE)) unlinkSync(TEMP_FILE);
