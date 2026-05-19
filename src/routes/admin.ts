@@ -1,7 +1,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { ImportService } from '../services/ImportService.js';
 import { WeeklyDigestService } from '../services/WeeklyDigestService.js';
+import { query } from '../services/database.js';
+import { readFileSync, readdirSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const router = Router();
 
@@ -87,6 +93,76 @@ router.get('/status', async (_req: Request, res: Response) => {
     environment: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString()
   });
+});
+
+/**
+ * POST /admin/migrate
+ *
+ * Apply any pending SQL migrations from the bundled `migrations/` folder.
+ * Mirrors `scripts/migrate.ts`, but lives in the runtime so we don't need
+ * tsx + the scripts folder shipped to Fly. Idempotent — uses
+ * schema_migrations bookkeeping the same way.
+ */
+router.post('/migrate', async (_req: Request, res: Response) => {
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // dist/routes -> ../../migrations from compiled JS location.
+    // Fall back to /app/migrations (the Dockerfile COPY target) if the
+    // relative path can't be resolved — keeps the endpoint usable
+    // regardless of where node started from.
+    const candidates = [
+      join(__dirname, '..', '..', 'migrations'),
+      '/app/migrations',
+    ];
+    const migrationsDir = candidates.find((p) => existsSync(p));
+    if (!migrationsDir) {
+      res.status(500).json({
+        status: 'error',
+        message: 'migrations directory not found',
+        searched: candidates,
+      });
+      return;
+    }
+
+    const files = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+
+    const appliedRes = await query<{ filename: string }>(
+      'SELECT filename FROM schema_migrations'
+    );
+    const applied = new Set(appliedRes.rows.map((r) => r.filename));
+
+    const ran: string[] = [];
+    const skipped: string[] = [];
+    for (const filename of files) {
+      if (applied.has(filename)) {
+        skipped.push(filename);
+        continue;
+      }
+      const sql = readFileSync(join(migrationsDir, filename), 'utf-8');
+      await query(sql);
+      await query(
+        'INSERT INTO schema_migrations (filename) VALUES ($1)',
+        [filename]
+      );
+      ran.push(filename);
+    }
+
+    res.json({ status: 'ok', migrationsDir, ran, skipped });
+  } catch (err) {
+    console.error('[Admin] Migrate failed:', err);
+    res.status(500).json({
+      status: 'error',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    });
+  }
 });
 
 /**
