@@ -166,6 +166,39 @@ router.post('/migrate', async (_req: Request, res: Response) => {
 });
 
 /**
+ * POST /admin/baseline-seen-icos
+ *
+ * One-shot: backdate every existing seen_icos row to a sentinel past
+ * date. The initial backfill stamps the whole company set with the
+ * import date, which would make the first weekly digest report all
+ * ~18k construction firms as "new". Backdating them clears the 7-day
+ * window so only genuinely-new ICOs (added by future imports) surface.
+ *
+ * Body:
+ *   date: string = '2026-01-01'   sentinel date to stamp
+ */
+router.post('/baseline-seen-icos', async (req: Request, res: Response) => {
+  const { date = '2026-01-01' } = req.body || {};
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ status: 'error', message: 'date must be YYYY-MM-DD' });
+    return;
+  }
+  try {
+    const result = await query(
+      'UPDATE seen_icos SET first_seen = $1::date',
+      [date]
+    );
+    res.json({ status: 'ok', backdated: result.rowCount, date });
+  } catch (err) {
+    console.error('[Admin] Baseline failed:', err);
+    res.status(500).json({
+      status: 'error',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    });
+  }
+});
+
+/**
  * POST /admin/weekly-pulse
  *
  * Synchronous "import then digest" pipeline. Triggered by the local
