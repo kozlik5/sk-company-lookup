@@ -120,7 +120,38 @@ export class SearchService {
       isActive: boolean;
     }>(sql, params);
 
-    // Trigram fallback only when prefix match returned 0 results.
+    // Contains fallback before trigram. Sole traders are stored as
+    // "Meno Priezvisko - Značka" (e.g. "Paul Johan Frans Slee - Devätoro remesiel"),
+    // so the brand name never prefix-matches, and the leading personal name drags
+    // trigram similarity below pg_trgm's 0.3 threshold — the firm was unfindable by
+    // its own brand. LIKE '%x%' is served by the existing GIN gin_trgm_ops index,
+    // and it only runs when the prefix match found nothing, so the Disk IO profile
+    // stays the same as before (see commit 07dd0e1).
+    if (result.rows.length === 0 && normalizedQuery.length >= 4 && !/^\d+$/.test(searchQuery.trim())) {
+      const containsResult = await query<{
+        ico: string;
+        name: string;
+        legalForm: string | null;
+        city: string | null;
+        isActive: boolean;
+      }>(`
+        SELECT
+          ico,
+          name,
+          legal_form as "legalForm",
+          city,
+          is_active as "isActive"
+        FROM companies
+        WHERE name_normalized LIKE $1
+        ${includeInactive ? '' : 'AND is_active = true'}
+        ORDER BY length(name_normalized), name
+        LIMIT $2
+      `, [`%${escapedQuery}%`, limit]);
+
+      result.rows.push(...containsResult.rows);
+    }
+
+    // Trigram fallback only when prefix and contains both returned 0 results.
     // Previous threshold (<5) caused 70%+ extra trigram scans on debtors-shared DB,
     // exhausting Disk IO Budget. Most enrichment queries are exact prefix matches.
     if (result.rows.length === 0 && normalizedQuery.length >= 4 && !/^\d+$/.test(searchQuery.trim())) {

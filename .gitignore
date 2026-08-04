@@ -29,3 +29,6 @@ npm-debug.log*
 
 # Fly.io
 .fly/
+
+# Supabase CLI scratch (contains pooler-url etc.)
+supabase/.temp/

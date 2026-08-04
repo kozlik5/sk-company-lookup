@@ -209,6 +209,17 @@ export class ImportService {
         id INTEGER PRIMARY KEY,
         name TEXT
       );
+
+      -- Dropped again at the end of the import, but a failed run leaves them
+      -- behind and the Supabase advisor flags them as publicly accessible.
+      ALTER TABLE import_organizations       ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE import_identifiers         ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE import_names               ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE import_addresses           ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE import_legal_form_entries  ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE import_legal_forms         ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE import_economic_activities ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE import_main_activities     ENABLE ROW LEVEL SECURITY;
     `);
 
     // Read and stream data to database
@@ -417,6 +428,12 @@ export class ImportService {
         imported_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       );
+
+      -- swapTables() renames this into place as \`companies\`, so RLS has to be
+      -- set here — otherwise every import silently drops it and the Supabase
+      -- advisor re-flags rls_disabled_in_public. App connects as postgres via
+      -- the pooler and bypasses RLS, so no policy is needed.
+      ALTER TABLE companies_staging ENABLE ROW LEVEL SECURITY;
     `);
 
     // NACE code source: organizations.main_activity_code_id -> main_activity_codes.id
